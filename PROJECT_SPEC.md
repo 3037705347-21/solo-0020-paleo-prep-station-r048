@@ -28,6 +28,8 @@
 
 放行只允许发生在标本进入 `stabilized` 且不存在未结束方案时。放行成功后标本进入 `available`，并永久保留一条放行记录。
 
+残渣容器只有 `open` 和 `sealed` 两种状态。启用后可以补记残渣：每条残渣必须挂到真实存在的标本，同一张记料单凭据在同一容器内只能计一次，累计重量不能超过容器上限。封存是一次性状态转换：封存后不能再补记残渣，并固定当时的全部成员与总重量，形成唯一一条交运事实；同一容器重复封存会被拒绝。容器当前重量、成员条数与交运事实始终一致。
+
 ## 业务链路
 
 ### 登记标本
@@ -46,6 +48,10 @@
 
 标本管理员通过 `POST /specimens/{id}/release` 提交借阅目的、接收方和批准人。服务再次检查标本状态和方案闭合状态，成功后写入不可覆盖的放行记录并把标本置为 `available`。
 
+### 归集与交运残渣
+
+制备组通过 `POST /residue-containers` 按残渣种类启用专用容器，再通过 `POST /residue-containers/{id}/residues` 凭记料单补记残渣。每次补记都校验容器处于启用状态、标本真实存在、记料单凭据未重复使用且不超过容量。容器装妥后通过 `POST /residue-containers/{id}/seal` 在同一仓储事务中封存容器并固定成员与重量，形成唯一一条交运事实；封存之后补记和再次封存都会返回状态冲突。`GET /residue-containers/{id}` 返回容器、当前成员以及交运事实的一致快照。
+
 ## 模块边界
 
 - `cmd/paleo-prep-station` 负责进程参数、监听和关闭。
@@ -63,6 +69,9 @@
 - `POST /plans/{id}/approval` 成功返回 `200` 和更新后的方案。
 - `POST /plans/{id}/progress` 成功返回 `201` 和进度记录。
 - `POST /specimens/{id}/release` 成功返回 `201` 和放行记录。
+- `POST /residue-containers` 成功返回 `201` 和容器。
+- `POST /residue-containers/{id}/residues` 成功返回 `201` 和残渣记录。
+- `POST /residue-containers/{id}/seal` 成功返回 `200` 和交运事实。
 - 输入不合法返回 `400`，对象不存在返回 `404`，状态冲突或重复标识返回 `409`。
 
 ## 验证计划

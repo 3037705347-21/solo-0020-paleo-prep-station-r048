@@ -32,6 +32,9 @@ go run ./cmd/paleo-prep-station --addr 127.0.0.1:18133
 - `POST /plans/{id}/approval`
 - `POST /plans/{id}/progress`
 - `POST /specimens/{id}/release`
+- `POST /residue-containers` 与 `GET /residue-containers/{id}`
+- `POST /residue-containers/{id}/residues`
+- `POST /residue-containers/{id}/seal`
 
 ## 本地验证
 

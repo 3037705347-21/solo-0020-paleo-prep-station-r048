@@ -91,6 +91,9 @@ func (s *Service) AddResidue(
 		if !ok {
 			return contracts.NotFound("residue_container_not_found", "未找到残渣容器 "+containerID)
 		}
+		if _, ok := m.GetSpecimen(request.SpecimenID); !ok {
+			return notFoundSpecimen(request.SpecimenID)
+		}
 		entry, err := domain.NewResidueEntry(
 			s.nextID("residue"),
 			containerID,
@@ -103,12 +106,15 @@ func (s *Service) AddResidue(
 		if err != nil {
 			return err
 		}
-		if container.UsedGrams+entry.Grams > container.CapacityGrams {
-			return contracts.Conflict("residue_container_full", "残渣容器装填量超过上限")
+		if container.IsSealed() {
+			return contracts.Conflict("residue_container_sealed", "残渣容器已封存，不能再补记残渣")
 		}
-		container.UsedGrams += entry.Grams
-		container.Version++
-		container.UpdatedAt = s.now().UTC()
+		if _, exists := m.ResidueKeyExists(containerID, entry.EntryKey); exists {
+			return contracts.Conflict("duplicate_residue_entry", "同一张记料单已经计过，不能重复计入")
+		}
+		if err := container.RecordResidue(entry, s.now()); err != nil {
+			return err
+		}
 		m.AppendResidue(entry)
 		m.PutResidueContainer(container)
 		created = entry
@@ -132,22 +138,23 @@ func (s *Service) SealResidueContainer(
 		if !ok {
 			return contracts.NotFound("residue_container_not_found", "未找到残渣容器 "+containerID)
 		}
+		if _, exists := m.ShipmentForContainer(containerID); exists {
+			return contracts.Conflict("residue_shipment_exists", "该容器已留下交运事实，不能重复封存")
+		}
+		if err := container.Seal(request.SealedBy, s.now()); err != nil {
+			return err
+		}
 		entries := m.ResiduesForContainer(containerID)
 		shipment, err := domain.NewResidueShipment(
 			s.nextID("shipment"),
 			container,
-			request.SealedBy,
+			container.SealedBy,
 			entries,
 			s.now(),
 		)
 		if err != nil {
 			return err
 		}
-		stamp := s.now().UTC()
-		container.SealedBy = shipment.SealedBy
-		container.SealedAt = &stamp
-		container.Version++
-		container.UpdatedAt = stamp
 		m.PutResidueContainer(container)
 		m.PutResidueShipment(shipment)
 		created = shipment

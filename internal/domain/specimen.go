@@ -207,6 +207,45 @@ func NewResidueContainer(
 	}, nil
 }
 
+func (c ResidueContainer) IsSealed() bool {
+	return c.Status == ResidueContainerSealed
+}
+
+// RecordResidue 围绕容器当前事实变更重量：未封存才能计入，且不能超过装填上限。
+func (c *ResidueContainer) RecordResidue(entry ResidueEntry, now time.Time) error {
+	if c.Status == ResidueContainerSealed {
+		return contracts.Conflict("residue_container_sealed", "残渣容器已封存，不能再补记残渣")
+	}
+	if entry.ContainerID != c.ID {
+		return contracts.Internal("residue_container_mismatch", "残渣记录与所属容器不一致", nil)
+	}
+	if c.UsedGrams+entry.Grams > c.CapacityGrams {
+		return contracts.Conflict("residue_container_full", "残渣容器装填量超过上限")
+	}
+	c.UsedGrams += entry.Grams
+	c.Version++
+	c.UpdatedAt = now.UTC()
+	return nil
+}
+
+// Seal 把容器从启用推进到封存，封存是一次性状态转换，不能重复办理。
+func (c *ResidueContainer) Seal(sealedBy string, now time.Time) error {
+	if c.Status == ResidueContainerSealed {
+		return contracts.Conflict("residue_container_sealed", "残渣容器已封存并留下交运事实，不能重复封存")
+	}
+	sealer, err := requiredText("封存人", sealedBy, 80)
+	if err != nil {
+		return err
+	}
+	stamp := now.UTC()
+	c.Status = ResidueContainerSealed
+	c.SealedBy = sealer
+	c.SealedAt = &stamp
+	c.Version++
+	c.UpdatedAt = stamp
+	return nil
+}
+
 func NewResidueEntry(
 	id string,
 	containerID string,
@@ -260,6 +299,9 @@ func NewResidueShipment(
 	if container.ID == "" {
 		return ResidueShipment{}, contracts.Internal("missing_container_id", "残渣容器未指定", nil)
 	}
+	if container.Status != ResidueContainerSealed {
+		return ResidueShipment{}, contracts.Conflict("residue_container_not_sealed", "只有已封存容器才能形成交运事实")
+	}
 	sealer, err := requiredText("封存人", sealedBy, 80)
 	if err != nil {
 		return ResidueShipment{}, err
@@ -267,8 +309,14 @@ func NewResidueShipment(
 	total := 0
 	frozen := make([]ResidueEntry, 0, len(entries))
 	for _, entry := range entries {
+		if entry.ContainerID != container.ID {
+			return ResidueShipment{}, contracts.Internal("residue_container_mismatch", "交运成员不属于该残渣容器", nil)
+		}
 		total += entry.Grams
 		frozen = append(frozen, entry)
+	}
+	if total != container.UsedGrams {
+		return ResidueShipment{}, contracts.Internal("residue_weight_drift", "交运重量与容器当前残渣重量不一致", nil)
 	}
 	return ResidueShipment{
 		ID:          id,
