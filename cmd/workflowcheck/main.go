@@ -42,6 +42,30 @@ type releaseView struct {
 	SpecimenID string `json:"specimen_id"`
 }
 
+type residueContainerView struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	UsedGrams int    `json:"used_grams"`
+}
+
+type residueEntryView struct {
+	ID       string `json:"id"`
+	EntryKey string `json:"entry_key"`
+	Grams    int    `json:"grams"`
+}
+
+type residueShipmentView struct {
+	ID         string `json:"id"`
+	TotalGrams int    `json:"total_grams"`
+	EntryCount int    `json:"entry_count"`
+}
+
+type residueView struct {
+	Container residueContainerView `json:"container"`
+	Entries   []residueEntryView   `json:"entries"`
+	Shipment  *residueShipmentView `json:"shipment"`
+}
+
 func main() {
 	workflow := flag.String("workflow", "", "workflow id to check")
 	flag.Parse()
@@ -168,6 +192,151 @@ func run(workflow string) error {
 		}
 		if fetched.Status != "available" {
 			return fmt.Errorf("expected available specimen, got %s", fetched.Status)
+		}
+		return nil
+
+	case "seal-residue-container":
+		specimen, err := registerSpecimen(client, server.URL)
+		if err != nil {
+			return err
+		}
+		var container residueContainerView
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers",
+			contracts.OpenResidueContainerRequest{Code: "RS-2026-01", Kind: "基质粉尘", CapacityGrams: 500},
+			http.StatusCreated,
+			&container,
+		); err != nil {
+			return err
+		}
+		if container.Status != "open" {
+			return fmt.Errorf("expected open container, got %s", container.Status)
+		}
+		sheet := contracts.AddResidueRequest{
+			EntryKey:   "SHEET-2026-0001",
+			SpecimenID: specimen.ID,
+			Grams:      120,
+			RecordedBy: "preparator-chen",
+		}
+		var entry residueEntryView
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/residues",
+			sheet,
+			http.StatusCreated,
+			&entry,
+		); err != nil {
+			return err
+		}
+		var replayed residueEntryView
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/residues",
+			sheet,
+			http.StatusCreated,
+			&replayed,
+		); err != nil {
+			return err
+		}
+		if replayed.ID != entry.ID {
+			return errors.New("resubmitted sheet created a second residue entry")
+		}
+		changed := sheet
+		changed.Grams = 130
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/residues",
+			changed,
+			http.StatusConflict,
+			nil,
+		); err != nil {
+			return err
+		}
+		ghost := sheet
+		ghost.EntryKey = "SHEET-2026-0002"
+		ghost.SpecimenID = "specimen-missing"
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/residues",
+			ghost,
+			http.StatusNotFound,
+			nil,
+		); err != nil {
+			return err
+		}
+		var shipment residueShipmentView
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/seal",
+			contracts.SealResidueContainerRequest{SealedBy: "keeper-zhou"},
+			http.StatusOK,
+			&shipment,
+		); err != nil {
+			return err
+		}
+		if shipment.TotalGrams != 120 || shipment.EntryCount != 1 {
+			return fmt.Errorf(
+				"shipment fact mismatch: total=%d count=%d",
+				shipment.TotalGrams,
+				shipment.EntryCount,
+			)
+		}
+		late := sheet
+		late.EntryKey = "SHEET-2026-0003"
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/residues",
+			late,
+			http.StatusConflict,
+			nil,
+		); err != nil {
+			return err
+		}
+		if err := requestJSON(
+			client,
+			http.MethodPost,
+			server.URL+"/residue-containers/"+container.ID+"/seal",
+			contracts.SealResidueContainerRequest{SealedBy: "keeper-wu"},
+			http.StatusConflict,
+			nil,
+		); err != nil {
+			return err
+		}
+		var view residueView
+		if err := requestJSON(
+			client,
+			http.MethodGet,
+			server.URL+"/residue-containers/"+container.ID,
+			nil,
+			http.StatusOK,
+			&view,
+		); err != nil {
+			return err
+		}
+		if view.Container.Status != "sealed" || view.Container.UsedGrams != 120 {
+			return fmt.Errorf(
+				"container facts mismatch: status=%s used=%d",
+				view.Container.Status,
+				view.Container.UsedGrams,
+			)
+		}
+		if len(view.Entries) != 1 {
+			return fmt.Errorf("expected exactly one residue entry, got %d", len(view.Entries))
+		}
+		if view.Shipment == nil || view.Shipment.ID != shipment.ID {
+			return errors.New("container must keep exactly one shipment fact")
+		}
+		if view.Shipment.TotalGrams != view.Container.UsedGrams ||
+			view.Shipment.EntryCount != len(view.Entries) {
+			return errors.New("shipment fact disagrees with container residue facts")
 		}
 		return nil
 	default:

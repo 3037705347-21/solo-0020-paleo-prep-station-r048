@@ -207,6 +207,43 @@ func NewResidueContainer(
 	}, nil
 }
 
+func (c ResidueContainer) IsOpen() bool {
+	return c.Status == ResidueContainerOpen
+}
+
+func (c *ResidueContainer) AcceptResidue(grams int, now time.Time) error {
+	if !c.IsOpen() {
+		return contracts.Conflict("residue_container_sealed", "残渣容器已封存，不能再补记残渣")
+	}
+	if grams <= 0 {
+		return contracts.Invalid("invalid_residue_weight", "残渣重量必须大于零")
+	}
+	if c.UsedGrams+grams > c.CapacityGrams {
+		return contracts.Conflict("residue_container_full", "残渣容器装填量超过上限")
+	}
+	c.UsedGrams += grams
+	c.Version++
+	c.UpdatedAt = now.UTC()
+	return nil
+}
+
+func (c *ResidueContainer) Seal(sealedBy string, now time.Time) error {
+	if c.Status == ResidueContainerSealed {
+		return contracts.Conflict("residue_container_sealed", "残渣容器已封存，不能重复办理交运")
+	}
+	sealer, err := requiredText("封存人", sealedBy, 80)
+	if err != nil {
+		return err
+	}
+	stamp := now.UTC()
+	c.Status = ResidueContainerSealed
+	c.SealedBy = sealer
+	c.SealedAt = &stamp
+	c.Version++
+	c.UpdatedAt = stamp
+	return nil
+}
+
 func NewResidueEntry(
 	id string,
 	containerID string,
